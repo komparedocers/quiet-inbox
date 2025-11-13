@@ -1,13 +1,13 @@
 package com.quietinbox.services;
 
 import android.content.Context;
-import android.util.Log;
 
 import com.quietinbox.api.ApiClient;
 import com.quietinbox.api.ApiService;
 import com.quietinbox.database.*;
 import com.quietinbox.models.*;
 import com.quietinbox.utils.ConfigLoader;
+import com.quietinbox.utils.Logger;
 
 import java.io.IOException;
 import java.text.SimpleDateFormat;
@@ -33,15 +33,22 @@ public class SyncManager {
     private final ConfigLoader config;
 
     private SyncManager(Context context) {
+        Logger.enter(TAG, "SyncManager constructor");
         this.context = context.getApplicationContext();
         this.database = AppDatabase.getInstance(context);
+        Logger.d(TAG, "Database initialized");
         this.apiService = ApiClient.getInstance(context).getService();
+        Logger.d(TAG, "API service initialized");
         this.executorService = Executors.newSingleThreadExecutor();
+        Logger.d(TAG, "Executor service initialized");
         this.config = ConfigLoader.getInstance(context);
+        Logger.i(TAG, "SyncManager initialized successfully");
+        Logger.exit(TAG, "SyncManager constructor");
     }
 
     public static synchronized SyncManager getInstance(Context context) {
         if (instance == null) {
+            Logger.d(TAG, "Creating new SyncManager instance");
             instance = new SyncManager(context);
         }
         return instance;
@@ -51,51 +58,83 @@ public class SyncManager {
      * Sync all pending changes to server
      */
     public void syncAll(SyncCallback callback) {
+        Logger.enter(TAG, "syncAll");
+        Logger.separator(TAG, "SYNC ALL START");
+
         executorService.execute(() -> {
+            Logger.Timer timer = new Logger.Timer(TAG, "syncAll");
+
             try {
+                // Check network availability
+                Logger.d(TAG, "Checking network availability...");
                 if (!isNetworkAvailable()) {
-                    Log.w(TAG, "Network not available, skipping sync");
+                    Logger.w(TAG, "Network not available, aborting sync");
+                    Logger.network(TAG, false);
                     if (callback != null) callback.onError("Network not available");
                     return;
                 }
+                Logger.network(TAG, true);
 
+                // Check user authentication
+                Logger.d(TAG, "Checking user authentication...");
                 UserEntity user = database.userDao().getUser();
                 if (user == null || user.accessToken == null) {
-                    Log.w(TAG, "User not logged in, skipping sync");
+                    Logger.w(TAG, "User not logged in, aborting sync");
                     if (callback != null) callback.onError("Not logged in");
                     return;
                 }
+                Logger.i(TAG, "User authenticated, token available");
 
                 String token = "Bearer " + user.accessToken;
 
                 // Sync profiles
+                Logger.d(TAG, "Starting profile sync...");
                 syncProfiles(token);
+                Logger.i(TAG, "Profile sync completed");
 
                 // Sync VIPs
+                Logger.d(TAG, "Starting VIP sync...");
                 syncVIPs(token);
+                Logger.i(TAG, "VIP sync completed");
 
                 // Sync notifications
+                Logger.d(TAG, "Starting notification sync...");
                 syncNotifications(token);
+                Logger.i(TAG, "Notification sync completed");
 
                 // Update last sync time
-                database.userDao().updateLastSync(System.currentTimeMillis());
+                long syncTime = System.currentTimeMillis();
+                Logger.d(TAG, "Updating last sync time: " + syncTime);
+                database.userDao().updateLastSync(syncTime);
+                Logger.db(TAG, "UPDATE user", "last_sync = " + syncTime);
 
-                Log.i(TAG, "Sync completed successfully");
+                Logger.separator(TAG, "SYNC ALL SUCCESS");
+                Logger.i(TAG, "All sync operations completed successfully");
+
                 if (callback != null) callback.onSuccess();
 
             } catch (Exception e) {
-                Log.e(TAG, "Sync error", e);
+                Logger.e(TAG, "Sync error - operation failed", e);
+                Logger.separator(TAG, "SYNC ALL FAILED");
                 if (callback != null) callback.onError(e.getMessage());
+            } finally {
+                timer.stop();
+                Logger.exit(TAG, "syncAll");
             }
         });
     }
 
     private void syncProfiles(String token) {
+        Logger.enter(TAG, "syncProfiles");
+
         try {
             List<ProfileEntity> unsyncedProfiles = database.profileDao().getUnsyncedProfiles();
+            Logger.sync(TAG, "Profiles to sync", unsyncedProfiles.size());
 
             for (ProfileEntity profile : unsyncedProfiles) {
                 try {
+                    Logger.d(TAG, "Syncing profile: " + profile.name + " (ID: " + profile.id + ")");
+
                     Profile apiProfile = new Profile();
                     apiProfile.name = profile.name;
                     apiProfile.quiet_hours_start = profile.quietHoursStart;
@@ -105,26 +144,37 @@ public class SyncManager {
 
                     Response<Profile> response;
                     if (profile.serverId == null) {
-                        // Create new profile
+                        Logger.d(TAG, "Creating new profile on server");
+                        Logger.api(TAG, "/v1/profile", "POST");
                         response = apiService.createProfile(token, apiProfile).execute();
                     } else {
-                        // Update existing profile
+                        Logger.d(TAG, "Updating existing profile on server (serverId: " + profile.serverId + ")");
+                        Logger.api(TAG, "/v1/profile/" + profile.serverId, "PUT");
                         response = apiService.updateProfile(token, profile.serverId, apiProfile).execute();
                     }
+
+                    Logger.apiResponse(TAG, "/v1/profile", response.code(), response.message());
 
                     if (response.isSuccessful() && response.body() != null) {
                         profile.serverId = response.body().id;
                         profile.synced = true;
                         database.profileDao().update(profile);
-                        Log.d(TAG, "Profile synced: " + profile.name);
+                        Logger.db(TAG, "UPDATE profile", "ID: " + profile.id + ", synced=true");
+                        Logger.i(TAG, "Profile synced successfully: " + profile.name);
+                    } else {
+                        Logger.w(TAG, "Profile sync failed: " + response.code() + " " + response.message());
                     }
                 } catch (IOException e) {
-                    Log.e(TAG, "Error syncing profile: " + profile.name, e);
+                    Logger.e(TAG, "Network error syncing profile: " + profile.name, e);
                 }
             }
+
+            Logger.sync(TAG, "Profiles synced", unsyncedProfiles.size());
         } catch (Exception e) {
-            Log.e(TAG, "Error syncing profiles", e);
+            Logger.e(TAG, "Error in syncProfiles", e);
         }
+
+        Logger.exit(TAG, "syncProfiles");
     }
 
     private void syncVIPs(String token) {

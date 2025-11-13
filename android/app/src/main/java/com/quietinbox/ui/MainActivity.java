@@ -6,7 +6,6 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -29,6 +28,7 @@ import com.quietinbox.database.NotificationEntity;
 import com.quietinbox.services.NotificationClassifier;
 import com.quietinbox.services.SyncManager;
 import com.quietinbox.utils.AdManager;
+import com.quietinbox.utils.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -58,6 +58,7 @@ public class MainActivity extends AppCompatActivity {
     private BroadcastReceiver notificationReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            Logger.d(TAG, "Notification update broadcast received");
             loadNotifications();
         }
     };
@@ -65,22 +66,38 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Logger.lifecycle(TAG, "Activity created");
+        Logger.enter(TAG, "onCreate");
+
         setContentView(R.layout.activity_main);
 
         try {
+            Logger.d(TAG, "Initializing views...");
             initializeViews();
+
+            Logger.d(TAG, "Initializing services...");
             initializeServices();
+
+            Logger.d(TAG, "Checking notification access...");
             checkNotificationAccess();
+
+            Logger.d(TAG, "Loading notifications...");
             loadNotifications();
+
+            Logger.d(TAG, "Loading banner ad...");
             loadBannerAd();
 
             // Track screen view for ad display
             adManager.trackScreenView();
 
+            Logger.i(TAG, "MainActivity initialized successfully");
+
         } catch (Exception e) {
-            Log.e(TAG, "Error in onCreate", e);
+            Logger.e(TAG, "Error in onCreate - activity initialization failed", e);
             Toast.makeText(this, "Error initializing app", Toast.LENGTH_SHORT).show();
         }
+
+        Logger.exit(TAG, "onCreate");
     }
 
     private void initializeViews() {
@@ -148,23 +165,32 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadNotifications() {
+        Logger.enter(TAG, "loadNotifications");
+        Logger.d(TAG, "Loading notifications for filter: " + currentFilter);
+
         LiveData<List<NotificationEntity>> liveData =
             database.notificationDao().getNotificationsByAction(currentFilter);
 
         liveData.observe(this, notifications -> {
             if (notifications != null) {
+                Logger.i(TAG, "Loaded " + notifications.size() + " notifications");
                 adapter.updateData(notifications);
                 swipeRefresh.setRefreshing(false);
             }
         });
+
+        Logger.exit(TAG, "loadNotifications");
     }
 
     private void refreshData() {
+        Logger.userAction(TAG, "Refresh", "Manual sync triggered");
+
         // Sync with server
         syncManager.syncAll(new SyncManager.SyncCallback() {
             @Override
             public void onSuccess() {
                 runOnUiThread(() -> {
+                    Logger.i(TAG, "Sync completed successfully");
                     Toast.makeText(MainActivity.this, "Sync completed", Toast.LENGTH_SHORT).show();
                     swipeRefresh.setRefreshing(false);
                 });
@@ -173,6 +199,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onError(String error) {
                 runOnUiThread(() -> {
+                    Logger.e(TAG, "Sync failed: " + error);
                     Toast.makeText(MainActivity.this, "Sync failed: " + error, Toast.LENGTH_SHORT).show();
                     swipeRefresh.setRefreshing(false);
                 });
@@ -253,7 +280,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        Logger.lifecycle(TAG, "Activity resumed");
+
         registerReceiver(notificationReceiver, new IntentFilter("com.quietinbox.NOTIFICATION_UPDATE"));
+        Logger.d(TAG, "Notification receiver registered");
 
         // Show interstitial ad with smart frequency
         adManager.showInterstitialAd(this);
@@ -262,18 +292,24 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
+        Logger.lifecycle(TAG, "Activity paused");
+
         try {
             unregisterReceiver(notificationReceiver);
+            Logger.d(TAG, "Notification receiver unregistered");
         } catch (Exception e) {
-            // Receiver not registered
+            Logger.w(TAG, "Receiver was not registered", e);
         }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        Logger.lifecycle(TAG, "Activity destroyed");
+
         if (executorService != null) {
             executorService.shutdown();
+            Logger.d(TAG, "Executor service shut down");
         }
     }
 }

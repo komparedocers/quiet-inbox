@@ -6,10 +6,10 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.service.notification.StatusBarNotification;
-import android.util.Log;
 
 import com.quietinbox.database.AppDatabase;
 import com.quietinbox.database.NotificationEntity;
+import com.quietinbox.utils.Logger;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -27,51 +27,87 @@ public class NotificationListenerService extends android.service.notification.No
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "NotificationListenerService created");
+        Logger.lifecycle(TAG, "Service created");
+        Logger.enter(TAG, "onCreate");
 
-        database = AppDatabase.getInstance(this);
-        classifier = new NotificationClassifier(this);
-        executorService = Executors.newSingleThreadExecutor();
+        try {
+            database = AppDatabase.getInstance(this);
+            Logger.d(TAG, "Database instance initialized");
+
+            classifier = new NotificationClassifier(this);
+            Logger.d(TAG, "Classifier initialized");
+
+            executorService = Executors.newSingleThreadExecutor();
+            Logger.d(TAG, "ExecutorService initialized");
+
+            Logger.i(TAG, "NotificationListenerService successfully initialized");
+        } catch (Exception e) {
+            Logger.e(TAG, "Error initializing NotificationListenerService", e);
+        }
+
+        Logger.exit(TAG, "onCreate");
     }
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
+        Logger.enter(TAG, "onNotificationPosted");
+
         try {
+            String packageName = sbn.getPackageName();
+            Logger.notification(TAG, packageName, "Posted");
+
             // Ignore our own notifications
-            if (sbn.getPackageName().equals(getPackageName())) {
+            if (packageName.equals(getPackageName())) {
+                Logger.d(TAG, "Ignoring own notification");
                 return;
             }
 
             // Ignore ongoing notifications (media playback, etc.)
             if ((sbn.getNotification().flags & Notification.FLAG_ONGOING_EVENT) != 0) {
+                Logger.d(TAG, "Ignoring ongoing notification from: " + packageName);
                 return;
             }
 
-            Log.d(TAG, "Notification received from: " + sbn.getPackageName());
+            Logger.i(TAG, "Processing notification from: " + packageName);
 
             // Process in background
             executorService.execute(() -> processNotification(sbn));
 
         } catch (Exception e) {
-            Log.e(TAG, "Error in onNotificationPosted", e);
+            Logger.e(TAG, "Error in onNotificationPosted", e);
         }
+
+        Logger.exit(TAG, "onNotificationPosted");
     }
 
     private void processNotification(StatusBarNotification sbn) {
+        Logger.enter(TAG, "processNotification");
+        Logger.Timer timer = new Logger.Timer(TAG, "processNotification");
+
         try {
+            String packageName = sbn.getPackageName();
+            Logger.d(TAG, "Starting processing for package: " + packageName);
+
             // Classify the notification
+            Logger.d(TAG, "Classifying notification...");
             NotificationClassifier.ClassificationResult result = classifier.classify(sbn);
+            Logger.i(TAG, "Classification result: " + result.action +
+                " (confidence: " + result.confidence + ", isVip: " + result.isVip + ")");
 
             // Get app name
-            String appName = getAppName(sbn.getPackageName());
+            String appName = getAppName(packageName);
+            Logger.d(TAG, "App name resolved: " + appName);
 
             // Extract notification details
             String title = getTitle(sbn);
             String text = getText(sbn);
+            Logger.d(TAG, "Notification content - Title: " +
+                (title != null && title.length() > 30 ? title.substring(0, 30) + "..." : title) +
+                ", Text length: " + (text != null ? text.length() : 0));
 
             // Create entity
             NotificationEntity entity = new NotificationEntity();
-            entity.appPackage = sbn.getPackageName();
+            entity.appPackage = packageName;
             entity.appName = appName;
             entity.title = title;
             entity.text = text;
@@ -84,42 +120,54 @@ public class NotificationListenerService extends android.service.notification.No
             entity.dismissed = false;
 
             // Save to database
+            Logger.d(TAG, "Saving notification to database...");
             long id = database.notificationDao().insert(entity);
-
-            Log.d(TAG, "Notification classified as " + result.action +
-                    " (confidence: " + result.confidence + ") - ID: " + id);
+            Logger.db(TAG, "INSERT notification", "ID: " + id + ", Action: " + result.action);
 
             // Cancel notification based on action
             if (result.action.equals(NotificationClassifier.ACTION_NEVER)) {
-                // Cancel spam/unwanted notifications
+                Logger.i(TAG, "Canceling NEVER notification");
                 cancelNotification(sbn.getKey());
+                Logger.notification(TAG, packageName, "Cancelled (NEVER)");
             } else if (result.action.equals(NotificationClassifier.ACTION_LATER)) {
-                // Cancel and save for later
+                Logger.i(TAG, "Deferring LATER notification");
                 cancelNotification(sbn.getKey());
+                Logger.notification(TAG, packageName, "Deferred (LATER)");
                 // Schedule for later delivery (could use WorkManager here)
+            } else {
+                Logger.i(TAG, "Keeping NOW notification visible");
+                Logger.notification(TAG, packageName, "Showing (NOW)");
             }
-            // If ACTION_NOW, leave the notification as-is
 
             // Broadcast update to UI
+            Logger.d(TAG, "Broadcasting UI update");
             broadcastNotificationUpdate();
 
+            Logger.i(TAG, "Successfully processed notification ID: " + id);
+
         } catch (Exception e) {
-            Log.e(TAG, "Error processing notification", e);
+            Logger.e(TAG, "Error processing notification", e);
+        } finally {
+            timer.stop();
+            Logger.exit(TAG, "processNotification");
         }
     }
 
     @Override
     public void onNotificationRemoved(StatusBarNotification sbn) {
-        // Handle notification removal if needed
-        Log.d(TAG, "Notification removed: " + sbn.getPackageName());
+        Logger.notification(TAG, sbn.getPackageName(), "Removed");
+        Logger.d(TAG, "Notification removed from system: " + sbn.getPackageName());
     }
 
     private String getAppName(String packageName) {
         try {
             PackageManager pm = getPackageManager();
             ApplicationInfo appInfo = pm.getApplicationInfo(packageName, 0);
-            return pm.getApplicationLabel(appInfo).toString();
+            String appName = pm.getApplicationLabel(appInfo).toString();
+            Logger.d(TAG, "Resolved app name: " + packageName + " -> " + appName);
+            return appName;
         } catch (PackageManager.NameNotFoundException e) {
+            Logger.w(TAG, "App name not found for: " + packageName);
             return packageName;
         }
     }
@@ -148,22 +196,28 @@ public class NotificationListenerService extends android.service.notification.No
 
     @Override
     public void onDestroy() {
+        Logger.lifecycle(TAG, "Service destroying");
         super.onDestroy();
+
         if (executorService != null) {
+            Logger.d(TAG, "Shutting down executor service");
             executorService.shutdown();
         }
-        Log.d(TAG, "NotificationListenerService destroyed");
+
+        Logger.i(TAG, "NotificationListenerService destroyed");
     }
 
     @Override
     public void onListenerConnected() {
         super.onListenerConnected();
-        Log.d(TAG, "NotificationListenerService connected");
+        Logger.lifecycle(TAG, "Listener connected");
+        Logger.i(TAG, "NotificationListenerService is now active and listening");
     }
 
     @Override
     public void onListenerDisconnected() {
         super.onListenerDisconnected();
-        Log.d(TAG, "NotificationListenerService disconnected");
+        Logger.lifecycle(TAG, "Listener disconnected");
+        Logger.w(TAG, "NotificationListenerService disconnected - notifications will not be captured");
     }
 }

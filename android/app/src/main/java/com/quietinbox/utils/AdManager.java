@@ -2,7 +2,6 @@ package com.quietinbox.utils;
 
 import android.app.Activity;
 import android.content.Context;
-import android.util.Log;
 import android.view.View;
 import android.widget.FrameLayout;
 
@@ -30,11 +29,13 @@ public class AdManager {
     private int screenViewCount = 0;
 
     private AdManager(Context context) {
+        Logger.i(TAG, "Initializing AdManager");
         this.config = ConfigLoader.getInstance(context);
 
         // Initialize Mobile Ads SDK
         MobileAds.initialize(context, initializationStatus -> {
-            Log.d(TAG, "Mobile Ads SDK initialized");
+            Logger.i(TAG, "Mobile Ads SDK initialized");
+            Logger.ad(TAG, "SDK", "Initialized");
         });
     }
 

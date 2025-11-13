@@ -3,7 +3,7 @@ QuietInbox Backend Server
 FastAPI-based REST API for notification sync, profiles, and recommendations
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, status
+from fastapi import FastAPI, HTTPException, Depends, Header, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -12,6 +12,8 @@ import logging
 from datetime import datetime, timedelta
 import jwt
 from passlib.context import CryptContext
+import time
+import json
 
 from database import get_db, init_db
 from models import User, Profile, VIP, NotificationSync, SyncQueue
@@ -21,8 +23,12 @@ from schemas import (
     DeferralRecommendation, TokenResponse
 )
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure comprehensive logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s][%(name)s][%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
@@ -31,6 +37,51 @@ app = FastAPI(
     description="Backend API for QuietInbox notification management",
     version="1.0.0"
 )
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all HTTP requests and responses with timing"""
+    start_time = time.time()
+    request_id = f"{int(start_time * 1000)}"
+
+    # Log request
+    logger.info(f"→ REQUEST [{request_id}] {request.method} {request.url.path}")
+    logger.debug(f"  Headers: {dict(request.headers)}")
+
+    # Log request body for POST/PUT
+    if request.method in ["POST", "PUT", "PATCH"]:
+        try:
+            body = await request.body()
+            if body:
+                try:
+                    body_json = json.loads(body.decode())
+                    # Mask sensitive fields
+                    if "password" in body_json:
+                        body_json["password"] = "***MASKED***"
+                    if "access_token" in body_json:
+                        body_json["access_token"] = "***MASKED***"
+                    logger.debug(f"  Body: {json.dumps(body_json, indent=2)}")
+                except:
+                    logger.debug(f"  Body: <binary or non-JSON>")
+        except:
+            pass
+
+    # Process request
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        logger.error(f"✗ EXCEPTION [{request_id}] {str(e)}", exc_info=True)
+        raise
+
+    # Calculate duration
+    duration_ms = (time.time() - start_time) * 1000
+
+    # Log response
+    logger.info(f"← RESPONSE [{request_id}] {response.status_code} | {duration_ms:.2f}ms")
+
+    return response
+
 
 # CORS middleware
 app.add_middleware(
@@ -90,9 +141,22 @@ def verify_token(authorization: Optional[str] = Header(None), db: Session = Depe
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
+    logger.info("========== QuietInbox API Starting ==========")
     logger.info("Initializing database...")
-    init_db()
-    logger.info("Database initialized successfully")
+    try:
+        init_db()
+        logger.info("✓ Database initialized successfully")
+    except Exception as e:
+        logger.error(f"✗ Database initialization failed: {str(e)}", exc_info=True)
+        raise
+    logger.info("========== API Ready ==========")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("========== QuietInbox API Shutting Down ==========")
+
 
 
 @app.get("/")
@@ -123,15 +187,21 @@ async def health_check():
 @app.post("/v1/auth/register", response_model=TokenResponse)
 async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
     """Register a new user"""
+    logger.info(f"Registration attempt for device: {user_data.device_id}")
+
     try:
         # Check if user exists
+        logger.debug(f"Checking if email already registered: {user_data.email}")
         existing_user = db.query(User).filter(User.email == user_data.email).first()
         if existing_user:
+            logger.warning(f"Registration failed: Email already registered - {user_data.email}")
             raise HTTPException(status_code=400, detail="Email already registered")
 
         # Check device ID uniqueness
+        logger.debug(f"Checking device ID: {user_data.device_id}")
         existing_device = db.query(User).filter(User.device_id == user_data.device_id).first()
         if existing_device:
+            logger.info(f"Device already registered, returning token for user: {existing_device.id}")
             # Return token for existing device
             access_token = create_access_token(data={"sub": str(existing_device.id)})
             return TokenResponse(
@@ -141,6 +211,7 @@ async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
             )
 
         # Create new user
+        logger.debug("Creating new user")
         hashed_password = pwd_context.hash(user_data.password) if user_data.password else None
         new_user = User(
             email=user_data.email,
@@ -154,8 +225,10 @@ async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
         db.add(new_user)
         db.commit()
         db.refresh(new_user)
+        logger.info(f"✓ User created: ID={new_user.id}, Email={user_data.email}")
 
         # Create default profile
+        logger.debug("Creating default profile")
         default_profile = Profile(
             user_id=new_user.id,
             name="Default",
@@ -166,11 +239,11 @@ async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
         )
         db.add(default_profile)
         db.commit()
+        logger.info(f"✓ Default profile created for user: {new_user.id}")
 
         # Generate token
         access_token = create_access_token(data={"sub": str(new_user.id)})
-
-        logger.info(f"New user registered: {new_user.id}")
+        logger.info(f"✓ Registration successful: user_id={new_user.id}")
 
         return TokenResponse(
             access_token=access_token,
